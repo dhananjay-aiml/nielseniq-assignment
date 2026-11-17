@@ -1,26 +1,37 @@
 import os
 
-from counter.adapters.count_repo import CountMongoDBRepo, CountInMemoryRepo
+from counter.adapters.count_repo import CountInMemoryRepo, CountPostgresRepo
 from counter.adapters.object_detector import TFSObjectDetector, FakeObjectDetector
-from counter.domain.actions import CountDetectedObjects
+from counter.domain.actions import CountDetectedObjects, PredictObjects
 
 
-def dev_count_action() -> CountDetectedObjects:
-    return CountDetectedObjects(FakeObjectDetector(), CountInMemoryRepo())
+def get_object_detector():
+    env = os.environ.get('ENV', 'dev')
+    if env == 'dev':
+        return FakeObjectDetector()
+    if env == 'prod':
+        tfs_host = os.environ.get('TFS_HOST', 'localhost')
+        tfs_port = os.environ.get('TFS_PORT', 8501)
+        model_name = os.environ.get('MODEL_NAME', 'ssd_mobilenet_v2')
+        return TFSObjectDetector(tfs_host, tfs_port, model_name)
+    raise ValueError(f"Unsupported ENV value: {env}")
 
 
-def prod_count_action() -> CountDetectedObjects:
-    tfs_host = os.environ.get('TFS_HOST', 'localhost')
-    tfs_port = os.environ.get('TFS_PORT', 8501)
-    mongo_host = os.environ.get('MONGO_HOST', 'localhost')
-    mongo_port = os.environ.get('MONGO_PORT', 27017)
-    mongo_db = os.environ.get('MONGO_DB', 'prod_counter')
-    model_name = os.environ.get('MODEL_NAME', 'ssd_mobilenet_v2')
-    return CountDetectedObjects(TFSObjectDetector(tfs_host, tfs_port, model_name),
-                                CountMongoDBRepo(host=mongo_host, port=mongo_port, database=mongo_db))
+def get_object_count_repo():
+    env = os.environ.get('ENV', 'dev')
+    if env == 'dev':
+        return CountInMemoryRepo()
+    if env == 'prod':
+        dsn = os.environ.get('POSTGRES_DSN')
+        if not dsn:
+            raise ValueError("POSTGRES_DSN must be set when ENV=prod")
+        return CountPostgresRepo(dsn)
+    raise ValueError(f"Unsupported ENV value: {env}")
 
 
 def get_count_action() -> CountDetectedObjects:
-    env = os.environ.get('ENV', 'dev')
-    count_action_fn = f"{env}_count_action"
-    return globals()[count_action_fn]()
+    return CountDetectedObjects(get_object_detector(), get_object_count_repo())
+
+
+def get_prediction_action() -> PredictObjects:
+    return PredictObjects(get_object_detector())

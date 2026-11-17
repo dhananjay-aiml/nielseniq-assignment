@@ -69,10 +69,35 @@ docker run --rm -d `
     tensorflow/serving
 ```
 
-## Running MongoDB
+## Running PostgreSQL
 
 ```bash
-docker run --rm --name test-mongo -p 27017:27017 -d mongo:latest
+docker run --rm --name object-counter-postgres \
+-e POSTGRES_DB=prod_counter \
+-e POSTGRES_USER=counter \
+-e POSTGRES_PASSWORD=counter \
+-p 5432:5432 -d postgres:16
+```
+
+PowerShell:
+```powershell
+docker run --rm --name object-counter-postgres `
+-e POSTGRES_DB=prod_counter `
+-e POSTGRES_USER=counter `
+-e POSTGRES_PASSWORD=counter `
+-p 5432:5432 -d postgres:16
+```
+
+For production mode, configure the database connection string:
+
+Unix:
+```bash
+export POSTGRES_DSN="host=localhost port=5432 dbname=prod_counter user=counter password=counter"
+```
+
+PowerShell:
+```powershell
+$env:POSTGRES_DSN = "host=localhost port=5432 dbname=prod_counter user=counter password=counter"
 ```
 
 ## Setup virtualenv (Python >= 3.10)
@@ -121,6 +146,16 @@ python -m counter.entrypoints.webapp
  curl -F "threshold=0.9" -F "file=@resources/images/food.jpg" http://localhost:5000/object-count 
 ```
 
+To get the detections rather than their per-class counts:
+```bash
+curl -F "threshold=0.9" -F "file=@resources/images/boy.jpg" http://localhost:5000/predictions
+```
+
+The `/predictions` response is a JSON list of predictions, each with `class_name`,
+`score`, and a normalized `box` containing `xmin`, `ymin`, `xmax`, and `ymax`.
+Both endpoints return HTTP 400 for missing, empty, or invalid image uploads and
+thresholds outside the inclusive range 0–1.
+
 > [!TIP]
 > If you face service connectivity issues on Windows, try replacing "localhost" with "127.0.0.1" globally
 
@@ -129,3 +164,31 @@ python -m counter.entrypoints.webapp
 ```
 pytest
 ```
+
+The entrypoint tests exercise the Flask request flow with the development fake
+detector and in-memory counter. They do not require TensorFlow Serving or
+PostgreSQL. The object-count end-to-end test submits two image requests and
+checks that the response reflects the updated cumulative count.
+
+### PostgreSQL integration test
+
+The integration test submits requests through Flask and verifies that counts
+are persisted by the PostgreSQL adapter. It uses a deterministic detector, so
+TensorFlow Serving is not required. Run it only against a disposable test
+database, never a production database:
+
+```powershell
+docker run --rm --name object-counter-test-postgres `
+  -e POSTGRES_DB=object_counter_test `
+  -e POSTGRES_USER=counter `
+  -e POSTGRES_PASSWORD=counter `
+  -p 5433:5432 -d postgres:16
+
+$env:POSTGRES_TEST_DSN = "host=127.0.0.1 port=5433 dbname=object_counter_test user=counter password=counter"
+python -m pytest -m integration
+docker stop object-counter-test-postgres
+```
+
+Without `POSTGRES_TEST_DSN`, the integration test is skipped when running the
+regular test suite. It creates a unique object class per run and removes only
+that test row afterward.

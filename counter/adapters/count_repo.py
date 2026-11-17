@@ -1,7 +1,5 @@
 from typing import List
 
-from pymongo import MongoClient
-
 from counter.domain.models import ObjectCount
 from counter.domain.ports import ObjectCountRepo
 
@@ -27,30 +25,60 @@ class CountInMemoryRepo(ObjectCountRepo):
                 self.store[key] = ObjectCount(key, new_object_count.count)
 
 
-class CountMongoDBRepo(ObjectCountRepo):
-
-    def __init__(self, host, port, database):
-        self.__host = host
-        self.__port = port
-        self.__database = database
-
-    def __get_counter_col(self):
-        client = MongoClient(self.__host, self.__port)
-        db = client[self.__database]
-        counter_col = db.counter
-        return counter_col
+class CountPostgresRepo(ObjectCountRepo):
+    def __init__(self, dsn: str):
+        if not dsn:
+            raise ValueError("A PostgreSQL DSN must be configured")
+        try:
+            import psycopg
+        except ImportError as error:
+            raise RuntimeError(
+                "The PostgreSQL adapter requires psycopg; install the project requirements"
+            ) from error
+        self.__psycopg = psycopg
+        self.__dsn = dsn
+        with self.__psycopg.connect(self.__dsn) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS object_counts (
+                    object_class TEXT PRIMARY KEY,
+                    count BIGINT NOT NULL
+                )
+                """
+            )
 
     def read_values(self, object_classes: List[str] = None) -> List[ObjectCount]:
-        counter_col = self.__get_counter_col()
-        query = {"object_class": {"$in": object_classes}} if object_classes else None
-        counters = counter_col.find(query)
-        object_counts = []
-        for counter in counters:
-            object_counts.append(ObjectCount(counter['object_class'], counter['count']))
-        return object_counts
+        with self.__psycopg.connect(self.__dsn) as connection:
+            if object_classes is None:
+                rows = connection.execute(
+                    "SELECT object_class, count FROM object_counts ORDER BY object_class"
+                ).fetchall()
+            elif not object_classes:
+                return []
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT object_class, count
+                    FROM object_counts
+                    WHERE object_class = ANY(%s)
+                    ORDER BY object_class
+                    """,
+                    (object_classes,),
+                ).fetchall()
+        return [ObjectCount(object_class, count) for object_class, count in rows]
 
     def update_values(self, new_values: List[ObjectCount]):
-        counter_col = self.__get_counter_col()
-        for value in new_values:
-            counter_col.update_one({'object_class': value.object_class}, {'$inc': {'count': value.count}}, upsert=True)
+        if not new_values:
+            return
+        with self.__psycopg.connect(self.__dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.executemany(
+                    """
+                    INSERT INTO object_counts (object_class, count)
+                    VALUES (%s, %s)
+                    ON CONFLICT (object_class)
+                    DO UPDATE SET count = object_counts.count + EXCLUDED.count
+                    """,
+                    [(value.object_class, value.count) for value in new_values],
+                )
 
